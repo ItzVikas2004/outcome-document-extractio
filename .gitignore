@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+.vscode/
+data/
+uploads/
+sample/
+*.zip
