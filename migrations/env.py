@@ -3,6 +3,7 @@ from alembic import context
 from app.config import Settings
 from app.db import Base, create_database_engine
 from app.logging import configure_logging
+from app import models  # Register model metadata for autogeneration.
 
 settings = Settings()
 configure_logging(settings.log_level)

@@ -1,4 +1,5 @@
 from typing import Literal
+from pathlib import Path
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,3 +15,4 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_api_key: SecretStr | None = None
     worker_poll_interval_seconds: float = Field(default=5.0, gt=0)
+    upload_dir: Path = Path("uploads")
