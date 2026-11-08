@@ -12,3 +12,5 @@ data/
 uploads/
 sample/
 *.zip
+.test-runtime/
+.test-deps/

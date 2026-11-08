@@ -1,0 +1,49 @@
+x-app: &app
+  build: .
+  environment:
+    DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://outcome@postgres:5432/outcome}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    LLM_BASE_URL: ${LLM_BASE_URL:-}
+    LLM_API_KEY: ${LLM_API_KEY:-}
+    WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-5}
+  depends_on:
+    postgres:
+      condition: service_healthy
+  init: true
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *app
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+    stop_grace_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: outcome
+      POSTGRES_DB: outcome
+      # Local development only; no host port is published.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outcome -d outcome"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
