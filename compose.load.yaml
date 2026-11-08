@@ -1,0 +1,66 @@
+# Standalone, opt-in stack. No production .env interpolation or public ports.
+x-test: &test
+  build: .
+  environment:
+    DATABASE_URL: postgresql+psycopg://load@postgres:5432/load
+    LLM_BASE_URL: http://provider:8090/v1
+    LLM_API_KEY: offline-test-placeholder
+    LLM_PROVIDER_CONCURRENCY: 3
+    WORKER_LEASE_SECONDS: 6
+    WORKER_HEARTBEAT_SECONDS: 1
+    UPLOAD_DIR: /service/uploads
+  volumes:
+    - load_documents:/service/uploads
+    - ./tests:/service/tests:ro
+    - ./loadtests:/service/loadtests:ro
+    - ./contract:/service/contract:ro
+    - ./load_reports:/reports
+  init: true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: load
+      POSTGRES_DB: load
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - load_database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U load -d load']
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  migrate:
+    <<: *test
+    command: [alembic, upgrade, head]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    <<: *test
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  worker:
+    <<: *test
+    command: [python, -m, app.worker]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      provider:
+        condition: service_started
+  provider:
+    <<: *test
+    command: [uvicorn, loadtests.provider:app, --host, 0.0.0.0, --port, '8090']
+  runner:
+    <<: *test
+    profiles: [tools]
+    command: [python, -m, loadtests.run]
+
+networks:
+  default:
+    internal: true
+volumes:
+  load_database:
+  load_documents:

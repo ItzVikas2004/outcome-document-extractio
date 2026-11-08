@@ -247,3 +247,14 @@ safety margin and terminate overdue extraction children. Timely terminal publica
 requires PostgreSQL and at least one healthy worker; an outage of both cannot satisfy
 a wall-clock deadline. Optional webhook delivery is **unsupported**: URLs are stored
 only, no delivery is attempted or represented as successful. Poll GET /jobs/{job_id}.
+
+### Offline API load and recovery tests
+
+Run `python loadtests/orchestrate.py` from the repository root with Docker Compose
+available. See [loadtests/README.md](loadtests/README.md) for commands, isolation,
+metrics definitions and limitations. This opt-in harness exercises ten concurrent
+HTTP submissions, canonical-schema deduplication, tenant isolation, real worker
+SIGKILL/restart, and scaling from one to three workers using an offline provider.
+It uses a separate internal-network Compose project and never calls a paid model.
+Detailed measured reports are written to ignored `load_reports/`; assertion failures
+return a nonzero exit code. Standard pytest discovery does not run load tests.
