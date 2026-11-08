@@ -110,3 +110,51 @@ For a non-Docker deployment run `alembic upgrade head` before starting services.
 Stop services with `docker compose down`; both data volumes are retained.
 
 Sample validation scores: not run yet; extraction is outside this skeleton's scope.
+
+Local parsers are available independently of the API/worker extraction boundary:
+
+```python
+from app.parsing import parse_document, parse_to_jsonl, render_pdf_page
+
+parse_to_jsonl("document.xlsx", "evidence.jsonl")
+for record in parse_document("document.pdf"):
+    # Process one evidence record at a time; avoid list(...) on large documents.
+    if record.kind == "ocr_required":
+        render_pdf_page("document.pdf", record.location["page"], "fallback-page.png")
+```
+
+The internal evidence format consists of ordered `Record` objects with `kind`,
+`location`, `text`, `cells` and `metadata`. All row, column, page and section
+indices are one-based. Start/end records delimit documents, PDF pages, DOCX
+sections/tables/header/footer regions, XLSX sheets and CSV tables. DOCX body order
+is preserved, including nested tables. Paragraphs inside cells are identified by
+their table/row/column location and supplement the row cells; do not count them as
+additional table rows. PDF text blocks and geometrically detected tables carry
+bounding boxes; PDF table recognition remains heuristic.
+
+XLSX reads use openpyxl's read-only mode plus streaming OOXML for merged ranges,
+exact raw numbers, date serials and cached formula values. Numeric values are
+lexical strings with `kind="number"` internally, avoiding float precision loss.
+Dates have ISO representations plus their raw serial, number format and workbook
+epoch. Formula expressions and caches are preserved but never recalculated.
+Merged anchor text is not copied into empty covered cells. Blank rows/cells within
+the stored sheet extent are retained. CSV values remain verbatim strings (including
+numeric/date text); row locations also record physical lines for multiline fields.
+CSV defaults to UTF-8/BOM or BOM-marked UTF-16; optional `csv_encoding` and
+`csv_delimiter` arguments handle other known input conventions.
+
+Parsing occurs in a separate process and publishes JSONL atomically after complete
+success. Defaults cap files at 50 MiB, expanded Office archives at 128 MiB, individual
+XML parts at 32 MiB, shared strings at 8 MiB, records at 1 MiB, output at 128 MiB,
+pages at 2,000, rows at 200,000, columns at 2,048 and cells at 2,000,000. `ParseLimits`
+allows explicit changes. Docker/Linux enforces a 768 MiB address-space cap and
+120-second CPU/wall timeout; non-Linux hosts retain structural limits and the wall
+timeout but lack that OS memory cap. Oversized or malformed documents fail explicitly
+without publishing truncated output. Empty documents raise `EMPTY_DOCUMENT`.
+
+PDF pages without text, or predominantly raster pages with sparse text, emit
+`ocr_required`; the final record reports `needs_ocr` and affected page numbers.
+The fallback renderer produces a local PNG capped at 150 DPI / eight million
+pixels. OCR/approved-gateway vision execution is deferred; no text is fabricated,
+no hosted parser is used, and no LLM is called. DOCX pagination is not invented.
+These parser modules are not yet wired into the unconfigured production extractor.

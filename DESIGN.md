@@ -70,4 +70,18 @@ locals and document contents. Child stdout/stderr and library logging are suppre
 Tests use a freshly migrated PostgreSQL schema and cover concurrent claims/dedupe,
 an actual process crash after claim commit, retries, lease expiry/renewal, stale
 writes, deadline sweeps, hung children and database state invariants. Next steps
-are real format parsers and model calls, webhook delivery, and orphan reconciliation.
+are model calls, webhook delivery, and orphan reconciliation.
+
+Local parsing is now implemented independently in `app/parsing`, using PyMuPDF,
+python-docx, openpyxl and Python csv. An isolated process writes ordered JSONL
+evidence to disk before atomic publication, bounding address space on Linux,
+execution time, expanded archives, rows/cells, individual records and total output.
+CSV and XLSX are row-oriented; DOCX's in-memory package is bounded by archive/XML
+limits and the process memory cap. Read-only openpyxl is supplemented with streaming
+XML because its numeric conversion loses lexical precision and its read-only
+worksheet omits merged-cell metadata. Raw numeric/date/formula evidence survives;
+CSV/date text is never guessed into a numeric type. PDF table grouping is geometric
+and may require later vision assistance. Textless/sparse scanned pages produce
+explicit OCR-required records and can be rendered with a bounded local PNG helper.
+Actual OCR/vision integration remains deferred. Synthetic test fixtures are generated
+at runtime; no sample documents or answers are copied into the repository.
