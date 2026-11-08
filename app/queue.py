@@ -2,6 +2,7 @@
 import copy
 import json
 import math
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -56,6 +57,17 @@ class JobQueue:
         job.lease_expires_at = None
         job.next_attempt_at = None
 
+    @staticmethod
+    def remember_failure(job, now, code):
+        if job.error_history and job.error_history[-1]["timestamp"] == now.isoformat() and job.error_history[-1]["code"] == code.value:
+            return
+        job.error_history = [*(job.error_history or []), {
+            "timestamp": now.isoformat(), "job_id": job.job_id,
+            "attempt": job.attempt_count, "stage": job.stage or "QUEUED",
+            "code": code.value, "message": SAFE_MESSAGES[code],
+            "elapsed_ms": max(0, int((now - job.created_at).total_seconds() * 1000)),
+        }]
+
     def terminal_failure(self, session, job, now, code):
         # Even an unstarted timed-out job follows PENDING -> RUNNING -> FAILED.
         if job.status == "PENDING":
@@ -63,6 +75,7 @@ class JobQueue:
             job.first_started_at = now
             job.queue_duration_ms = max(0, int((now - job.created_at).total_seconds() * 1000))
             session.flush()
+        self.remember_failure(job, now, code)
         job.status = "FAILED"
         job.error = {"code": code.value, "message": SAFE_MESSAGES[code]}
         job.result = None
@@ -104,6 +117,8 @@ class JobQueue:
             if now >= self.cutoff(job):
                 self.terminal_failure(session, job, now, FailureCode.DEADLINE_EXCEEDED)
                 return None
+            if job.status == "RUNNING" and job.lease_token is not None:
+                self.remember_failure(job, now, FailureCode.WORKER_LOST)
             job.status = "RUNNING"
             job.attempt_count += 1
             job.retry_count = job.attempt_count - 1
@@ -141,18 +156,20 @@ class JobQueue:
             job.lease_expires_at = min(now + timedelta(seconds=self.settings.worker_lease_seconds), self.cutoff(job))
             return True
 
-    def fail(self, lease, code=FailureCode.EXTRACTION_ERROR, retryable=True):
+    def fail(self, lease, code=FailureCode.EXTRACTION_ERROR, retryable=True, retry_after=0):
         code = FailureCode(code)
         with self.sessions.begin() as session:
             job, now = self.owned(session, lease)
             if job is None:
                 return False
+            self.remember_failure(job, now, code)
             if not retryable:
                 self.terminal_failure(session, job, now, code)
             elif job.attempt_count >= job.max_attempts:
                 self.terminal_failure(session, job, now, FailureCode.ATTEMPTS_EXHAUSTED)
             else:
-                delay = min(30, self.settings.worker_retry_base_seconds * 2 ** (job.attempt_count - 1))
+                delay = random.uniform(0.5, 1.0) * min(30, self.settings.worker_retry_base_seconds * 2 ** (job.attempt_count - 1))
+                delay = max(delay, retry_after)
                 if now + timedelta(seconds=delay) >= self.cutoff(job):
                     self.terminal_failure(session, job, now, FailureCode.DEADLINE_EXCEEDED)
                 else:
@@ -196,6 +213,10 @@ class JobQueue:
                 if event.get("cost_source") not in {"unavailable", "provider_reported", "configured_rate_estimate"}:
                     return False
                 existing.update({key: event.get(key) for key in ("tokens_in", "tokens_out", "cost_usd", "cost_source")})
+                for key in ("http_status", "duration_ms"):
+                    value = event.get(key)
+                    if type(value) is int and value >= 0:
+                        existing[key] = value
                 existing["state"] = "completed"
             else:
                 return False

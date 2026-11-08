@@ -210,3 +210,40 @@ and `LLM_OUTPUT_PRICE_PER_MILLION` produce explicitly labeled
 With no rate or reported cost, `cost_usd` is only the known subtotal (possibly zero),
 `cost_is_known_subtotal=true`, and `cost_complete=false`; zero does not mean free.
 `cost_source`, `usage_complete` and per-model flags make mixed/unknown data explicit.
+
+### Reliability and operation
+
+`WORKER_COUNT` configures Compose replicas (default 2); `LLM_PROVIDER_CONCURRENCY`
+limits simultaneous HTTP requests across replicas (default 2). All workers must
+use the same value and the same `document_data` volume. Linux kernel file locks
+release slots on process death, and no database transaction is held during HTTP
+calls or retry waits. This limiter supports single-host Compose, not distributed
+hosts/NFS. Injected test transports bypass it; dedicated tests exercise real slots.
+
+Request retries (`LLM_TRANSPORT_RETRIES`, default 2 additional attempts) cover
+408/429/500/502/503/504 and transport failures, with capped exponential full jitter.
+Valid Retry-After seconds or HTTP dates impose a minimum delay, without a 30-second
+cap. If that delay cannot fit the remaining deadline, the job fails safely.
+Authentication, invalid requests and unsupported models fail without transport
+retries. JSON repair has its own bounded budget. Exhausted transient request
+retries use the separate `WORKER_MAX_ATTEMPTS` job budget; aggregate call/token
+budgets persist across attempts. Retries may repeat paid requests when the provider
+accepted a request but its response was lost; exactly-once provider billing is not
+possible without provider idempotency support.
+
+Failures and abandoned leases are retained in PostgreSQL `jobs.error_history`,
+with safe codes/messages, job IDs, attempts, stages and elapsed milliseconds.
+`llm_usage` records response status and request duration where available. Structured
+worker logs include correlation/job IDs and attempt duration; Compose uses rotating
+persistent local-driver logs (5 x 10 MB per container). Export logs externally for
+retention beyond container removal. Exception messages and document content are
+excluded; configured credentials and URLs are redacted. SIGTERM stops claims and
+kills the extraction child; replacement workers recover the job after lease expiry.
+Terminal updates remain fenced, atomic, and repeat-safe (duplicate publications
+return false and do not modify terminal data).
+
+The 1800-second deadline includes queue time; supervisors reap jobs with a five-second
+safety margin and terminate overdue extraction children. Timely terminal publication
+requires PostgreSQL and at least one healthy worker; an outage of both cannot satisfy
+a wall-clock deadline. Optional webhook delivery is **unsupported**: URLs are stored
+only, no delivery is attempted or represented as successful. Poll GET /jobs/{job_id}.

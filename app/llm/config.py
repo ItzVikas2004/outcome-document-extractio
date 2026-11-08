@@ -24,6 +24,7 @@ class LLMConfig:
     max_calls: int = 64
     transport_retries: int = 2
     repair_retries: int = 1
+    provider_concurrency: int = 2
     timeout_seconds: int = 45
     input_price_per_million: Decimal | None = None
     output_price_per_million: Decimal | None = None
@@ -33,7 +34,7 @@ class LLMConfig:
         valid = (self.model in ALLOWED_MODELS and self.api_key.strip()
                  and parsed.scheme in {"http", "https"} and parsed.netloc
                  and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment)
-        numbers = (self.max_input_tokens, self.max_output_tokens, self.total_input_budget, self.max_calls, self.timeout_seconds)
+        numbers = (self.max_input_tokens, self.max_output_tokens, self.total_input_budget, self.max_calls, self.timeout_seconds, self.provider_concurrency)
         rates = (self.input_price_per_million, self.output_price_per_million)
         if (not valid or any(type(n) is not int or n <= 0 for n in numbers)
                 or not 0 <= self.transport_retries <= 5 or not 0 <= self.repair_retries <= 3
@@ -51,7 +52,7 @@ class LLMConfig:
                 "max_input_tokens": "LLM_MAX_INPUT_TOKENS", "max_output_tokens": "LLM_MAX_OUTPUT_TOKENS",
                 "total_input_budget": "LLM_TOTAL_INPUT_BUDGET", "max_calls": "LLM_MAX_CALLS",
                 "transport_retries": "LLM_TRANSPORT_RETRIES", "repair_retries": "LLM_REPAIR_RETRIES",
-                "timeout_seconds": "LLM_TIMEOUT_SECONDS"}.items() if os.environ.get(env)}
+                "provider_concurrency": "LLM_PROVIDER_CONCURRENCY", "timeout_seconds": "LLM_TIMEOUT_SECONDS"}.items() if os.environ.get(env)}
             for name, env in (("input_price_per_million", "LLM_INPUT_PRICE_PER_MILLION"),
                               ("output_price_per_million", "LLM_OUTPUT_PRICE_PER_MILLION")):
                 if os.environ.get(env):

@@ -339,3 +339,29 @@ def test_durable_call_budget_rejects_dispatch_before_network(client, queue):
     event = {"kind": "start", "id": "first", "model": "google/gemini-3.8-flash", "input_bound": 200}
     assert queue.record_usage(lease, event)
     assert not queue.record_usage(lease, {**event, "id": "second"})
+
+
+def test_failure_history_survives_requeue_and_crash(client, queue):
+    identifier = submit(client).json()['job_id']
+    first = queue.claim()
+    assert queue.fail(first, FailureCode.LLM_PROVIDER_ERROR)
+    advance(client, identifier, 'next_attempt_at')
+    second = queue.claim()
+    advance(client, identifier, 'lease_expires_at')
+    third = queue.claim()
+    assert third.attempt == 3
+    assert queue.finish(third, fake_extract(third))
+    job = row(client, identifier)
+    assert [event['code'] for event in job.error_history] == ['LLM_PROVIDER_ERROR', 'WORKER_LOST']
+    assert [event['attempt'] for event in job.error_history] == [1, 2]
+    assert not queue.fail(second)
+    assert row(client, identifier).error_history == job.error_history
+
+
+def test_provider_delay_persisted_between_job_attempts(client, queue):
+    identifier = submit(client).json()['job_id']
+    lease = queue.claim()
+    assert queue.fail(lease, FailureCode.LLM_PROVIDER_ERROR, retry_after=75)
+    job = row(client, identifier)
+    assert (job.next_attempt_at - job.updated_at).total_seconds() >= 75
+    assert queue.claim() is None

@@ -9,6 +9,7 @@ x-app: &app
     LLM_MAX_INPUT_TOKENS: ${LLM_MAX_INPUT_TOKENS:-16000}
     LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-8192}
     LLM_TOTAL_INPUT_BUDGET: ${LLM_TOTAL_INPUT_BUDGET:-500000}
+    LLM_PROVIDER_CONCURRENCY: ${LLM_PROVIDER_CONCURRENCY:-2}
     LLM_MAX_CALLS: ${LLM_MAX_CALLS:-64}
     LLM_TRANSPORT_RETRIES: ${LLM_TRANSPORT_RETRIES:-2}
     LLM_REPAIR_RETRIES: ${LLM_REPAIR_RETRIES:-1}
@@ -30,6 +31,11 @@ x-app: &app
       condition: service_completed_successfully
   init: true
   restart: unless-stopped
+  logging:
+    driver: local
+    options:
+      max-size: "10m"
+      max-file: "5"
 
 services:
   migrate:
@@ -55,6 +61,8 @@ services:
     <<: *app
     command: ["python", "-m", "app.worker"]
     stop_grace_period: 10s
+    deploy:
+      replicas: ${WORKER_COUNT:-2}
 
   postgres:
     image: postgres:16-alpine

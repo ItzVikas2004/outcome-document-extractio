@@ -1,5 +1,9 @@
 import json
 import time
+import random
+import math
+from contextlib import nullcontext
+from app.llm.limiter import provider_slot
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from uuid import uuid4
@@ -34,8 +38,10 @@ def strict_json(text):
 
 
 class Gateway:
-    def __init__(self, config, *, transport=None, usage_sink=None, deadline=None, sleep=time.sleep):
+    def __init__(self, config, *, transport=None, usage_sink=None, deadline=None, sleep=time.sleep, jitter=random.uniform):
         self.config, self.usage_sink, self.deadline, self.sleep = config, usage_sink, deadline, sleep
+        self.jitter = jitter
+        self.use_limiter = transport is None
         self.calls = []
         self.input_budget = 0
         self.client = httpx.Client(transport=transport, follow_redirects=False, trust_env=False)
@@ -66,16 +72,18 @@ class Gateway:
             self.emit({"kind": "start", **call})  # Durable acknowledgement before network I/O.
             self.calls.append(call)
             self.input_budget += bound
-            status, payload, delay = None, {}, min(2 ** attempt, 30)
+            started = time.monotonic()
+            status, payload, delay = None, {}, self.jitter(0, min(2 ** attempt, 30))
             try:
-                with self.client.stream("POST", config.base_url.rstrip("/") + "/chat/completions",
+                with (provider_slot(config.provider_concurrency, self.remaining) if self.use_limiter else nullcontext()), self.client.stream("POST", config.base_url.rstrip("/") + "/chat/completions",
                     headers={"Authorization": "Bearer " + config.api_key},
                     json={"model": config.model, "messages": messages, "temperature": 0,
                           "max_tokens": config.max_output_tokens, "response_format": {"type": "json_object"}},
-                    timeout=timeout) as response:
+                    timeout=min(timeout, self.remaining())) as response:
                     status = response.status_code
                     content = bytearray()
                     for chunk in response.iter_bytes():
+                        self.remaining()
                         content.extend(chunk)
                         if len(content) > 2 * 1024 * 1024:
                             raise InvalidResponse()
@@ -86,16 +94,19 @@ class Gateway:
                     retry_after = response.headers.get("Retry-After")
                     if retry_after:
                         try:
-                            delay = max(0, float(retry_after))
+                            parsed_delay = float(retry_after)
+                            if math.isfinite(parsed_delay) and parsed_delay >= 0:
+                                delay = max(delay, parsed_delay)
                         except ValueError:
                             try:
-                                delay = max(0, (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
-                            except (ValueError, TypeError):
+                                delay = max(delay, (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
+                            except (ValueError, TypeError, OverflowError):
                                 pass
             except httpx.TransportError:
-                pass
+                status = None
             finally:
-                call.update(usage_values(payload, config), state="completed", http_status=status)
+                call.update(usage_values(payload, config), state="completed", http_status=status,
+                            duration_ms=int((time.monotonic() - started) * 1000))
                 self.emit({"kind": "complete", **call})
             if status == 200:
                 try:
@@ -106,15 +117,14 @@ class Gateway:
                     if not isinstance(content, str):
                         raise InvalidResponse()
                     return content
-                except (KeyError, IndexError, TypeError):
+                except (KeyError, IndexError, TypeError, AttributeError):
                     raise InvalidResponse() from None
-            if status is not None and status not in (408, 429) and status < 500:
+            if status is not None and status not in (408, 429, 500, 502, 503, 504):
                 raise ExtractionFailure(FailureCode.LLM_PROVIDER_ERROR, retryable=False)
-            if attempt == config.transport_retries:
-                raise ExtractionFailure(FailureCode.LLM_PROVIDER_ERROR, retryable=True)
-            delay = min(delay, 30)
             if delay >= self.remaining():
                 raise ExtractionFailure(FailureCode.DEADLINE_EXCEEDED, retryable=False)
+            if attempt == config.transport_retries:
+                raise ExtractionFailure(FailureCode.LLM_PROVIDER_ERROR, retryable=True, retry_after=delay)
             self.sleep(delay)
 
     def json(self, system, payload, validator):

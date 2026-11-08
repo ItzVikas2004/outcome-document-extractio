@@ -111,3 +111,14 @@ Transport retries and JSON repairs consume the same persisted per-job call/input
 With another week, priorities are measured sample accuracy, table-boundary/continuation
 evaluation, OCR integration and resumable chunk checkpoints to avoid repeat calls after
 a crash. Actual model quality and price were not validated with live requests here.
+
+
+Reliability hardening: request retry budgets are independent of durable job attempts;
+Retry-After is a minimum wait bounded by the submission deadline. A Linux shared-volume
+file-lock semaphore limits provider requests across Compose replicas and releases on
+crash. It avoids open database transactions during model requests; a distributed
+multi-host deployment would need a distributed provider limiter. Safe failure history
+and per-request timing live in PostgreSQL; bounded rotating container logs contain
+correlation IDs and attempt durations. Terminal mutations remain fenced and repeat-safe.
+Webhook delivery is explicitly unsupported. No live provider credits were used for
+these changes; retry, malformed-response and crash checks use deterministic mocks.

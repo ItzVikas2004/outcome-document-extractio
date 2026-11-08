@@ -35,9 +35,10 @@ SAFE_MESSAGES = {
 
 
 class ExtractionFailure(Exception):
-    def __init__(self, code=FailureCode.EXTRACTION_ERROR, retryable=True):
+    def __init__(self, code=FailureCode.EXTRACTION_ERROR, retryable=True, retry_after=0):
         self.code = FailureCode(code)
         self.retryable = retryable
+        self.retry_after = retry_after
         super().__init__(SAFE_MESSAGES[self.code])
 
 

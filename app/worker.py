@@ -49,7 +49,7 @@ def extraction_child(connection, extractor, lease, parent_pid):
         except Exception as exc:
             code = exc.code if isinstance(exc, ExtractionFailure) else FailureCode.EXTRACTION_ERROR
             retryable = exc.retryable if isinstance(exc, ExtractionFailure) else True
-            connection.send(("error", (code, retryable, safe_exception(exc))))
+            connection.send(("error", (code, retryable, safe_exception(exc), getattr(exc, "retry_after", 0))))
         finally:
             connection.close()
 
@@ -60,6 +60,7 @@ def process_lease(queue, lease, stop_event, settings, extractor=extract):
     child = context.Process(target=extraction_child, args=(sender, extractor, lease, os.getpid()), daemon=True)
     child.start()
     sender.close()
+    started = monotonic()
     next_heartbeat = monotonic()
     next_maintenance = monotonic()
     try:
@@ -86,9 +87,9 @@ def process_lease(queue, lease, stop_event, settings, extractor=extract):
                     published = queue.finish(lease, payload)
                     logger.info("job_completion job_id=%s stage=VERIFYING accepted=%s", lease.job_id, published)
                 else:
-                    code, retryable, details = payload
+                    code, retryable, details, retry_after = payload
                     logger.error("extraction_failed job_id=%s stage=EXTRACTING details=%s", lease.job_id, json.dumps(details))
-                    queue.fail(lease, code, retryable)
+                    queue.fail(lease, code, retryable, retry_after=retry_after)
                 return
             if not child.is_alive():
                 queue.fail(lease, FailureCode.WORKER_LOST)
@@ -101,6 +102,9 @@ def process_lease(queue, lease, stop_event, settings, extractor=extract):
         if child.is_alive():
             child.kill()
             child.join(timeout=1)
+        logger.info("attempt_finished", extra={"job_id": lease.job_id, "correlation_id": lease.job_id,
+                    "stage": "EXTRACTING", "attempt": lease.attempt,
+                    "duration_ms": int((monotonic() - started) * 1000)})
         receiver.close()
         child.close()
 

@@ -55,3 +55,4 @@ class Job(Base):
     deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: utcnow() + timedelta(seconds=1800))
     queue_duration_ms: Mapped[int | None] = mapped_column(Integer)
     llm_usage: Mapped[list] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=list, server_default="[]")
+    error_history: Mapped[list] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=list, server_default="[]")

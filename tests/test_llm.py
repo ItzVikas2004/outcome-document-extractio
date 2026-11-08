@@ -189,7 +189,7 @@ def test_transport_retries_and_retry_after_are_counted(config):
         assert metadata["model_calls"] == 3 and metadata["tokens_in"] == 12
         assert not metadata["usage_complete"] and metadata["cost_source"] == "unavailable"
         assert metadata["cost_usd"] == 0 and metadata["cost_is_known_subtotal"]
-        assert sleeps == [1, 0]
+        assert 0 <= sleeps[0] <= 1 and 0 <= sleeps[1] <= 2
     finally:
         gateway.close()
 
