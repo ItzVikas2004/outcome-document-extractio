@@ -97,6 +97,7 @@ migrate and remove a unique schema, leaving application tables untouched:
 
 ```sh
 docker compose run --rm --no-deps -v "${PWD}/tests:/service/tests:ro" \
+  -v "${PWD}/scripts:/service/scripts:ro" \
   -e LLM_BASE_URL= -e LLM_API_KEY= \
   -e TEST_DATABASE_URL=postgresql+psycopg://outcome@postgres:5432/outcome \
   api python -m pytest /service/tests -q
@@ -258,3 +259,51 @@ SIGKILL/restart, and scaling from one to three workers using an offline provider
 It uses a separate internal-network Compose project and never calls a paid model.
 Detailed measured reports are written to ignored `load_reports/`; assertion failures
 return a nonzero exit code. Standard pytest discovery does not run load tests.
+
+### Run the assignment samples explicitly
+
+Install the project requirements in Python 3.12, start the configured API, then run:
+
+```sh
+python scripts/run_samples.py --sample-dir /path/to/extracted/sample --document-id lease_003 --limit 1 --max-in-flight 1
+python scripts/run_samples.py --sample-dir /path/to/extracted/sample --base-url http://localhost:8080 --limit 5 --max-in-flight 2
+```
+
+Replace `lease_003` with an exact `document_id` from your manifest. These commands
+submit real extraction jobs and can spend the API's configured model credits;
+they are never run automatically by tests or startup. The runner itself calls
+only your service, not the LLM gateway, and never reads validated reference answers.
+
+`--sample-dir` must contain `manifest.csv` with `document_id,file,schema_name`
+columns and `schemas/{schema_name}.json`. Extra manifest columns are ignored.
+Document paths resolve relative to this directory, with a fallback to
+`sample-data-documents/{file}` for bare filenames. The external manifest was not
+present in this checkout; these supported layouts follow the specified columns
+and assignment directory structure. Missing/invalid selected inputs fail preflight
+before any API requests.
+
+The default base URL is `http://localhost:8080`, concurrency is one, and omitting
+`--limit` processes all selected documents needing output. `--limit` caps new
+submissions in this invocation, excluding valid existing outputs; it is not a dollar
+budget. `--document-id` selects exactly one manifest entry. All supported formats
+are uploaded as multipart `file` plus the field-list `schema` JSON string.
+
+Outputs default to `outputs/{document_id}.json` relative to the current directory
+(`--output-dir` changes this). Each contains only `entries`, `metadata`, and the
+top-level `schema` name, extracted from the GET response's `result`. SUCCESS and
+PARTIAL results are checked against the official JSON Schema and requested field
+keys before atomic saving. Valid existing outputs for that schema are skipped
+unless `--overwrite` is set; invalid files can be replaced. Failed runs preserve
+existing files. Overwrite does not bypass server-side deduplication or guarantee
+fresh extraction. Existing-file validity checks structure and field names, not
+whether the source document has changed.
+
+Jobs are polled every two seconds. The deadline is 1800 seconds from POST start,
+including upload and queue wait; `--deadline` can shorten it. A client timeout or
+interruption does not cancel accepted server jobs. HTTP errors, FAILED jobs,
+malformed responses, missing fields, or deadline expiry produce a nonzero exit.
+POSTs are not automatically retried after ambiguous network failures. Output shows
+submission/total timings and API-reported usage, cost source, and completeness;
+unknown/subtotal costs are not treated as precise full costs.
+
+Offline runner tests: `python -m pytest tests/test_run_samples.py -q`.
