@@ -1,8 +1,10 @@
 # Design notes — Software Developer
 
 The current implementation covers durable job submission and status retrieval.
-Extraction, worker claiming, retry scheduling and webhook delivery are still
-pending. No models have been called and no LLM budget has been spent by this code.
+The worker uses durable leases, retries and ownership fencing. Real extraction
+and webhook delivery are still pending. The production extractor fails explicitly
+with EXTRACTION_NOT_CONFIGURED; deterministic fake extraction exists only in tests.
+No models have been called and no LLM budget has been spent by this code.
 
 PostgreSQL is the source of truth for jobs. The API validates multipart input,
 writes the document, computes SHA-256 hashes and commits a PENDING job. It performs
@@ -40,8 +42,32 @@ Compose runs a one-shot Alembic service after PostgreSQL becomes healthy. API an
 worker start only after migrations succeed, and share the document volume. The
 existing passwordless database configuration is limited to local development.
 
-Tests exercise real multipart requests, exact size boundaries, response latency,
-cross-tenant isolation, concurrent idempotency and PostgreSQL terminal-state
-enforcement. PostgreSQL tests migrate a fresh isolated schema. Next steps are
-leased worker claims and crash recovery, bounded provider retries, format parsers,
-output validation, webhook delivery and reconciliation of orphaned files.
+Workers atomically select eligible rows with FOR UPDATE SKIP LOCKED and commit
+RUNNING plus an attempt count, random fencing token, heartbeat and lease expiry.
+Transactions are short; extraction runs outside the database transaction in a
+supervised child process. Heartbeats and writes lock the row, then compare its
+token, state, lease expiry and deadline using PostgreSQL time. An expired token
+cannot be renewed. Retries and recovered claims remain RUNNING, preserving the
+forward-only public state machine. Claims increment attempt_count; retry_count is
+attempt_count minus one. A bounded exponential delay is persisted for retryable
+errors. Crashed attempts become eligible after lease expiry; exhausting the stored
+attempt budget terminates the job. Child output is validated against the output
+contract and requested field keys before a fenced publication transaction.
+
+Submission time and the 1800-second deadline are assigned by PostgreSQL. The first
+claim records queue duration; completion latency includes waiting and retries.
+Workers sweep deadlines while idle and while supervising extraction, reserving five
+seconds to persist terminal failures. Hung children are killed on lost ownership,
+deadline expiry or shutdown. Database connection, lock and statement timeouts bound
+normal stalls. A total database/worker outage necessarily prevents on-time writes;
+the next surviving worker deterministically fails overdue jobs rather than reviving
+them. Processing is at least once; result publication is fenced and terminal.
+
+Safe failures have allowlisted codes/messages. Diagnostic logs record exception
+types and stack locations but omit raw exception text, source lines, SQL arguments,
+locals and document contents. Child stdout/stderr and library logging are suppressed.
+
+Tests use a freshly migrated PostgreSQL schema and cover concurrent claims/dedupe,
+an actual process crash after claim commit, retries, lease expiry/renewal, stale
+writes, deadline sweeps, hung children and database state invariants. Next steps
+are real format parsers and model calls, webhook delivery, and orphan reconciliation.

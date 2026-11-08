@@ -5,3 +5,4 @@ psycopg[binary]==3.2.3
 alembic==1.14.0
 pydantic-settings==2.7.0
 python-multipart==0.0.20
+jsonschema==4.23.0

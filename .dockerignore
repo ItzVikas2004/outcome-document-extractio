@@ -6,5 +6,7 @@
 !alembic.ini
 !migrations/
 !migrations/**
+!contract/
+!contract/output.schema.json
 **/__pycache__/
 **/*.pyc

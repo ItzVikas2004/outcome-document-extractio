@@ -15,9 +15,12 @@ curl http://localhost:8080/health
 The API binds port 8080 and returns `200 {"status":"ok"}`. Compose also starts
 PostgreSQL 16 with a persistent volume and a separate worker process. Both app
 services wait for PostgreSQL's health check and the one-shot Alembic migration
-service. The worker currently waits for a shutdown signal; processing, retries,
-webhook delivery and extraction are not implemented yet. Accepted jobs remain
-PENDING. There are no LLM calls. `/health` is a liveness endpoint,
+service. The worker claims jobs using PostgreSQL row locks and durable leases,
+renews heartbeats, retries temporary failures, and recovers abandoned attempts.
+Real extraction and webhook delivery are not implemented yet: the production
+extractor returns FAILED with `EXTRACTION_NOT_CONFIGURED`. Fake extraction is
+confined to tests and is not selectable through environment variables or uploads.
+There are no LLM calls. `/health` is a liveness endpoint,
 not a database readiness check.
 
 No `.env` file is required. `.env.example` documents optional configuration;
@@ -57,6 +60,31 @@ jobs return 404. This header selects a namespace; it is not authentication.
 Duplicate document bytes and canonicalized schema JSON within one organization
 return the existing job, including its original webhook URL. Other organizations
 get independent jobs. Terminal PostgreSQL rows cannot be updated.
+
+Jobs transition `PENDING -> RUNNING -> SUCCESS/PARTIAL/FAILED`. Retries and crash
+recovery remain RUNNING; each new attempt gets a fresh lease token. Every heartbeat,
+failure and result write checks ownership and lease expiry under a row lock.
+Expired workers cannot publish results or renew their leases. A database trigger
+also prevents backward/skipped state transitions and changes to terminal rows.
+
+The default lease is 30 seconds, heartbeat 5 seconds, maximum attempts 3, and retry
+backoff 2, 4, ... seconds capped at 30. These are configured with the `WORKER_*`
+variables in `.env.example`; the maximum attempt count is stored at submission.
+`attempt_count` counts claims; `retry_count` counts attempts after the first.
+First-start time, queue duration, heartbeat, completion time and the submission-based
+1800-second deadline are stored internally without changing the HTTP contract.
+
+An independent maintenance check runs while extraction is busy. A five-second
+deadline reserve leaves time to persist a FAILED status; late results are rejected.
+Extraction runs in a supervised subprocess so hung work can be terminated.
+At least one worker and PostgreSQL must remain available to enforce deadlines;
+after an outage, overdue jobs are deterministically failed on the next sweep.
+External extraction side effects may repeat after a crash, but only the current
+lease can publish a result. Exception logs include job ID, stage, exception type
+and stack locations, excluding exception text, local variables and file contents.
+
+Scale processing with `docker compose up -d --scale worker=3`. SIGTERM stops the
+active child and lease renewal; another worker can recover after lease expiry.
 
 Job records live in PostgreSQL; files live in the `document_data` Docker volume,
 shared at `/service/uploads` by API and worker. Files are flushed and atomically

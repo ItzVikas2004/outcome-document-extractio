@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements-dev.txt \
 COPY app ./app
 COPY alembic.ini .
 COPY migrations ./migrations
+COPY contract/output.schema.json ./contract/output.schema.json
 RUN mkdir -p /service/.pytest_cache /service/uploads && chown -R appuser:appuser /service
 USER appuser
 EXPOSE 8080

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import StrEnum
 
 from sqlalchemy import JSON, CheckConstraint, DateTime, Integer, String, Text, UniqueConstraint
@@ -25,6 +25,7 @@ class Job(Base):
     __table_args__ = (
         CheckConstraint("status IN ('PENDING','RUNNING','SUCCESS','PARTIAL','FAILED')", name="job_status"),
         CheckConstraint("retry_count >= 0", name="job_retries"),
+        CheckConstraint("attempt_count >= 0 AND attempt_count <= max_attempts AND max_attempts > 0", name="job_attempts"),
         UniqueConstraint("organization_id", "document_hash", "schema_hash", name="job_submission"),
     )
 
@@ -42,3 +43,14 @@ class Job(Base):
     stage: Mapped[str | None] = mapped_column(Text)
     error: Mapped[dict | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
     result: Mapped[dict | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    worker_id: Mapped[str | None] = mapped_column(String(36))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: utcnow() + timedelta(seconds=1800))
+    queue_duration_ms: Mapped[int | None] = mapped_column(Integer)

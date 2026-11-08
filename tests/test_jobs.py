@@ -130,6 +130,9 @@ def test_status_response_shape(client, state):
               "metadata": {"model_calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0, "latency_ms": 0}}
     with client.session_factory() as session:
         job = session.get(Job, identifier)
+        if state != "PENDING":
+            job.status = "RUNNING"
+            session.flush()
         job.status, job.result, job.stage = state, result, "PARSING"
         job.error = {"code": "TEST_FAILURE", "message": "Synthetic test"} if state == "FAILED" else None
         session.commit()
@@ -184,6 +187,8 @@ def test_postgres_terminal_states_are_immutable(client, postgres_url, state):
     identifier = submit(client).json()["job_id"]
     with client.session_factory() as session:
         job = session.get(Job, identifier)
+        job.status = "RUNNING"
+        session.flush()
         job.status = state
         session.commit()
         job.status = "RUNNING"

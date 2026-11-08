@@ -152,6 +152,7 @@ def create_job(request: Request, file: Annotated[UploadFile, File()],
             if existing:
                 return serialize_job(existing)
             job = Job(job_id=job_id, organization_id=tenant, file_path=str(destination),
+                      max_attempts=request.app.state.settings.worker_max_attempts,
                       field_schema=field_schema, document_hash=document_hash,
                       schema_hash=schema_hash, webhook_url=str(webhook_url) if webhook_url is not None else None)
             session.add(job)
@@ -160,6 +161,7 @@ def create_job(request: Request, file: Annotated[UploadFile, File()],
             retained = True
             try:
                 session.commit()
+                session.refresh(job)  # Read database-assigned submission timestamps.
             except IntegrityError:
                 retained = False
                 session.rollback()
