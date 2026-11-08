@@ -17,10 +17,10 @@ PostgreSQL 16 with a persistent volume and a separate worker process. Both app
 services wait for PostgreSQL's health check and the one-shot Alembic migration
 service. The worker claims jobs using PostgreSQL row locks and durable leases,
 renews heartbeats, retries temporary failures, and recovers abandoned attempts.
-Real extraction and webhook delivery are not implemented yet: the production
-extractor returns FAILED with `EXTRACTION_NOT_CONFIGURED`. Fake extraction is
-confined to tests and is not selectable through environment variables or uploads.
-There are no LLM calls. `/health` is a liveness endpoint,
+The worker parses documents and performs structured LLM extraction through your
+configured gateway. Missing credentials produce `EXTRACTION_NOT_CONFIGURED`;
+webhook delivery remains deferred. Fake extraction is confined to tests and is
+not selectable through environment variables or uploads. `/health` is a liveness endpoint,
 not a database readiness check.
 
 No `.env` file is required. `.env.example` documents optional configuration;
@@ -52,7 +52,7 @@ a file limit of 50 MiB (50 * 1024 * 1024 bytes). It validates and persists the
 upload without extracting, then returns HTTP 202. Malformed/missing fields return
 400; oversized files return 413. Optional `webhook_url` accepts HTTP(S) URLs and
 is saved for future delivery. Arbitrary field keys and extra schema hints are
-preserved. Uploaded content is not yet parsed or checked against its extension.
+preserved. Actual document parsing happens asynchronously in the worker.
 
 Use the same `X-Organization-Id` for submission and retrieval. Omitted headers
 use an anonymous namespace; empty headers are rejected. Unknown and cross-tenant
@@ -96,7 +96,8 @@ PostgreSQL, set `TEST_DATABASE_URL` to a PostgreSQL SQLAlchemy URL. Tests create
 migrate and remove a unique schema, leaving application tables untouched:
 
 ```sh
-docker compose run --rm -v "${PWD}/tests:/service/tests:ro" \
+docker compose run --rm --no-deps -v "${PWD}/tests:/service/tests:ro" \
+  -e LLM_BASE_URL= -e LLM_API_KEY= \
   -e TEST_DATABASE_URL=postgresql+psycopg://outcome@postgres:5432/outcome \
   api python -m pytest /service/tests -q
 ```
@@ -109,7 +110,8 @@ For a non-Docker deployment run `alembic upgrade head` before starting services.
 
 Stop services with `docker compose down`; both data volumes are retained.
 
-Sample validation scores: not run yet; extraction is outside this skeleton's scope.
+Sample validation scores: not run yet. Provider tests use synthetic documents and
+an in-memory httpx transport; they spend no real API credits.
 
 Local parsers are available independently of the API/worker extraction boundary:
 
@@ -157,4 +159,54 @@ PDF pages without text, or predominantly raster pages with sparse text, emit
 The fallback renderer produces a local PNG capped at 150 DPI / eight million
 pixels. OCR/approved-gateway vision execution is deferred; no text is fabricated,
 no hosted parser is used, and no LLM is called. DOCX pagination is not invented.
-These parser modules are not yet wired into the unconfigured production extractor.
+The extraction pipeline consumes these parser records. Until OCR is integrated,
+documents requiring OCR fail explicitly with `DOCUMENT_REQUIRES_OCR` before any
+model call, rather than silently omitting scanned pages.
+
+Configure `LLM_BASE_URL` and `LLM_API_KEY` in the runtime environment (Compose passes
+them through). The client appends `/chat/completions` to the provided base path;
+there is no endpoint or key fallback. `LLM_MODEL` defaults to
+`google/gemini-3.8-flash` and is restricted to the nine exact IDs in ASSIGNMENT.md.
+No embeddings, hosted OCR, paid parser or alternate provider is used. Redirects
+are rejected, and environment proxies are disabled for gateway calls.
+
+The pipeline first plans field types and document/row scopes using arbitrary keys,
+names, descriptions and optional `primary`. It then processes every source unit in
+bounded batches with relevant header/global context. Single-document fields are
+reconciled into one entry, or repeated on every table entry. Table responses must
+account for every target source ID as a row, continuation, or explicit exclusion;
+exclusion IDs/reasons are retained in metadata. Duplicate primary values alone never
+merge rows. Only explicit, supported continuations with matching primary values
+merge. Conflicts and unsupported values become null and cause PARTIAL status.
+Semantic classification of logical rows still depends on the model.
+
+Models supply evidence IDs and exact quotations. The application verifies the quote
+and location against the parser, checks value support, and constructs citations.
+Numbers remain JSON numbers, dates use ISO dates, and printed percentages retain
+their scale. Arithmetic is recomputed from individually grounded operands. This
+conservative verification can return null for legitimate paraphrases or complex
+calculations; it favors unsupported-value rejection over plausible guesses.
+
+`LLM_MAX_INPUT_TOKENS` is enforced with a conservative UTF-8 byte upper bound plus
+message framing; actual usage always comes from provider usage fields. The defaults
+allow 16,000 input-bound units per request, 8,192 output tokens, 500,000 total
+input-bound units and 64 calls per job. HTTP retries and JSON repair count against
+these budgets. Documents that cannot be fully covered fail with
+`EXTRACTION_BUDGET_EXCEEDED`; no truncated table is published. Response bodies are
+capped at 2 MiB. Retryable 408/429/5xx/network failures use bounded backoff and
+Retry-After; malformed/omitted-row responses get bounded repair attempts.
+
+Before each HTTP dispatch, the supervisor persists a fenced call record and
+acknowledges it to the extraction child. Usage completions are idempotent and kept
+across worker attempts. The final metadata aggregates `model_calls`, reported
+`tokens_in`/`tokens_out`, cost and per-model totals from this ledger. Calls with
+unknown outcomes after a crash remain visible as `unconfirmed_calls`, with incomplete
+usage flags; their missing tokens/cost are not guessed. `model_calls` counts dispatch
+attempts, including this unavoidable uncertainty window.
+
+Provider `usage.cost` is preferred. If absent, optional `LLM_INPUT_PRICE_PER_MILLION`
+and `LLM_OUTPUT_PRICE_PER_MILLION` produce explicitly labeled
+`configured_rate_estimate` values for the configured model. No prices are hardcoded.
+With no rate or reported cost, `cost_usd` is only the known subtotal (possibly zero),
+`cost_is_known_subtotal=true`, and `cost_complete=false`; zero does not mean free.
+`cost_source`, `usage_complete` and per-model flags make mixed/unknown data explicit.

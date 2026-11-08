@@ -1,8 +1,9 @@
 """PostgreSQL queue operations. Every mutation holds a short row lock."""
 import copy
 import json
+import math
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
@@ -12,6 +13,8 @@ from sqlalchemy import and_, func, or_, select
 
 from app.extraction import ExtractionResult, FailureCode, SAFE_MESSAGES
 from app.models import Job
+from app.llm.config import ALLOWED_MODELS
+from app.llm.usage import summarize
 
 DEADLINE_MARGIN_SECONDS = 5
 
@@ -23,6 +26,7 @@ class Lease:
     attempt: int
     file_path: str = field(repr=False)
     field_schema: dict = field(repr=False)
+    deadline_at: datetime | None = None
 
 
 @lru_cache
@@ -114,7 +118,7 @@ class JobQueue:
             if job.first_started_at is None:
                 job.first_started_at = now
                 job.queue_duration_ms = max(0, int((now - job.created_at).total_seconds() * 1000))
-            return Lease(job.job_id, job.lease_token, job.attempt_count, job.file_path, copy.deepcopy(job.field_schema))
+            return Lease(job.job_id, job.lease_token, job.attempt_count, job.file_path, copy.deepcopy(job.field_schema), job.deadline_at)
 
     def owned(self, session, lease):
         job = session.scalar(select(Job).where(Job.job_id == lease.job_id).with_for_update())
@@ -159,6 +163,46 @@ class JobQueue:
                     job.error = {"code": code.value, "message": SAFE_MESSAGES[code]}
             return True
 
+    def record_usage(self, lease, event):
+        """Fenced and idempotent accounting; acknowledge start before a paid request."""
+        if event.get("model") not in ALLOWED_MODELS or not isinstance(event.get("id"), str):
+            return False
+        with self.sessions.begin() as session:
+            job, now = self.owned(session, lease)
+            if job is None:
+                return False
+            calls = copy.deepcopy(job.llm_usage)
+            existing = next((call for call in calls if call["id"] == event["id"]), None)
+            if event.get("kind") == "start":
+                if existing:
+                    return existing["lease_token"] == lease.token
+                bound = event.get("input_bound")
+                if (type(bound) is not int or bound <= 0 or len(calls) >= self.settings.llm_max_calls
+                        or sum(c.get("input_bound", 0) for c in calls) + bound > self.settings.llm_total_input_budget):
+                    return False
+                calls.append({"id": event["id"], "model": event["model"], "state": "started",
+                              "input_bound": bound, "lease_token": lease.token, "attempt": job.attempt_count})
+            elif event.get("kind") == "complete":
+                if existing is None or existing["lease_token"] != lease.token or existing["model"] != event["model"]:
+                    return False
+                if existing["state"] == "completed":
+                    return True
+                for key in ("tokens_in", "tokens_out"):
+                    if event.get(key) is not None and (type(event[key]) is not int or event[key] < 0):
+                        return False
+                cost = event.get("cost_usd")
+                if cost is not None and (type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0):
+                    return False
+                if event.get("cost_source") not in {"unavailable", "provider_reported", "configured_rate_estimate"}:
+                    return False
+                existing.update({key: event.get(key) for key in ("tokens_in", "tokens_out", "cost_usd", "cost_source")})
+                existing["state"] = "completed"
+            else:
+                return False
+            job.llm_usage = calls
+            job.updated_at = now
+            return True
+
     def finish(self, lease, output):
         # Validate outside the lock; ownership and deadline are checked afterwards.
         if not isinstance(output, ExtractionResult):
@@ -181,6 +225,8 @@ class JobQueue:
             if job is None:
                 return False
             result["metadata"]["latency_ms"] = max(0, int((now - job.created_at).total_seconds() * 1000))
+            if job.llm_usage:
+                result["metadata"].update(summarize(job.llm_usage))
             job.status = output.status
             job.result = result
             job.error = None

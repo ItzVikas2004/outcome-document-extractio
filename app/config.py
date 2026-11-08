@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     )
     llm_base_url: str | None = None
     llm_api_key: SecretStr | None = None
+    llm_max_calls: int = Field(default=64, ge=1, le=1000)
+    llm_total_input_budget: int = Field(default=500000, ge=1)
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=2)
     worker_lease_seconds: float = Field(default=30, ge=1, le=120)
     worker_heartbeat_seconds: float = Field(default=5, gt=0)

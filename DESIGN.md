@@ -1,10 +1,12 @@
 # Design notes — Software Developer
 
 The current implementation covers durable job submission and status retrieval.
-The worker uses durable leases, retries and ownership fencing. Real extraction
-and webhook delivery are still pending. The production extractor fails explicitly
-with EXTRACTION_NOT_CONFIGURED; deterministic fake extraction exists only in tests.
-No models have been called and no LLM budget has been spent by this code.
+The worker uses durable leases, retries and ownership fencing and now performs
+grounded structured extraction. The default model is google/gemini-3.8-flash, chosen
+from the assignment allowlist; model choice is configurable only within that list.
+The gateway and key are read from the environment at execution time. No real calls
+were made during implementation: tests use a mock httpx transport, spending $0.
+Webhook delivery and OCR/vision transcription remain deferred.
 
 PostgreSQL is the source of truth for jobs. The API validates multipart input,
 writes the document, computes SHA-256 hashes and commits a PENDING job. It performs
@@ -32,7 +34,7 @@ lookup. The header alone is not authentication; authenticated tenant identity
 would be required in a deployed multi-user service.
 
 The file size limit is interpreted as 50 MiB. Only extensions are checked at
-submission; actual format parsing belongs to the future worker. Field lists
+submission; actual format parsing happens in the worker. Field lists
 require names and descriptions while allowing arbitrary field keys and extra
 hints. Error responses use the contract's code/message shape. Result is omitted
 until SUCCESS or PARTIAL. A PostgreSQL trigger prevents terminal rows from being
@@ -70,7 +72,7 @@ locals and document contents. Child stdout/stderr and library logging are suppre
 Tests use a freshly migrated PostgreSQL schema and cover concurrent claims/dedupe,
 an actual process crash after claim commit, retries, lease expiry/renewal, stale
 writes, deadline sweeps, hung children and database state invariants. Next steps
-are model calls, webhook delivery, and orphan reconciliation.
+are OCR/vision integration, webhook delivery, and orphan reconciliation.
 
 Local parsing is now implemented independently in `app/parsing`, using PyMuPDF,
 python-docx, openpyxl and Python csv. An isolated process writes ordered JSONL
@@ -85,3 +87,27 @@ and may require later vision assistance. Textless/sparse scanned pages produce
 explicit OCR-required records and can be rendered with a bounded local PNG helper.
 Actual OCR/vision integration remains deferred. Synthetic test fixtures are generated
 at runtime; no sample documents or answers are copied into the repository.
+
+Extraction indexes evidence in a temporary SQLite database, plans types/scopes, then
+processes all source units in bounded batches. Context selection uses local lexical
+overlap and table headings, without embeddings. Every table unit must be explicitly
+accounted for; omitted units cause repair/failure. Logical continuation requires an
+explicit prior source ID and matching supported primary value; duplicate keys alone
+never collapse rows. Global facts are propagated to every entry; conflicting claims
+become null. Semantic row classification remains a model decision and needs sample
+evaluation. Budget exhaustion fails explicitly instead of returning a truncated table.
+
+The provider response is an internal evidence-bearing structure, not trusted final
+JSON. Quotes must be exact parser substrings; locations are generated locally.
+Scalar/date/percentage support and grounded arithmetic are checked before publication.
+Unsupported fields become null with PARTIAL status. This trades some recall (notably
+paraphrases and unsupported calculations) for more reliable citations and null discipline.
+
+Dispatches are durably recorded before network I/O using supervisor acknowledgements;
+completions and aggregation are fenced by lease token. Unknown crash outcomes remain
+incomplete rather than gaining invented tokens or cost. Provider cost wins over optional
+configured-rate estimates; absent both, metadata explicitly labels a known subtotal.
+Transport retries and JSON repairs consume the same persisted per-job call/input budget.
+With another week, priorities are measured sample accuracy, table-boundary/continuation
+evaluation, OCR integration and resumable chunk checkpoints to avoid repeat calls after
+a crash. Actual model quality and price were not validated with live requests here.

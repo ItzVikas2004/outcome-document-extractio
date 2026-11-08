@@ -250,7 +250,9 @@ def test_invalid_results_cannot_be_published(client, queue, kind):
     assert row(client, identifier).error["code"] == "INVALID_RESULT"
 
 
-def test_production_extractor_never_uses_fake_result(client, queue):
+def test_production_extractor_never_uses_fake_result(client, queue, monkeypatch):
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     identifier = submit(client).json()["job_id"]
     lease = queue.claim()
     process_lease(queue, lease, Event(), queue.settings)
@@ -290,3 +292,50 @@ def test_shutdown_stops_child_and_leaves_recoverable_lease(client, queue):
     recovered = queue.claim()
     assert recovered.token != lease.token
     assert queue.finish(recovered, fake_extract(recovered))
+
+
+def test_real_pipeline_mock_gateway_persists_usage_through_supervisor(client, queue):
+    from tests.mock_provider import TABLE_SCHEMA, worker_mock_extract
+    identifier = submit(client, extension="csv", content=b"Unit,Rent,Date\nA,100,2026-01-02\n",
+                        schema=json.dumps(TABLE_SCHEMA)).json()["job_id"]
+    lease = queue.claim()
+    process_lease(queue, lease, Event(), queue.settings, worker_mock_extract)
+    job = row(client, identifier)
+    assert job.status == "SUCCESS", job.error
+    assert len(job.llm_usage) == job.result["metadata"]["model_calls"] == 2
+    assert all(call["state"] == "completed" for call in job.llm_usage)
+    assert job.result["metadata"]["tokens_in"] == 200
+    assert job.result["entries"][0]["amount_custom"]["value"] == 100
+    assert job.result["metadata"]["cost_source"] == "provider_reported"
+
+
+def test_usage_fencing_idempotency_unknown_calls_and_cross_attempt_totals(client, queue):
+    identifier = submit(client).json()["job_id"]
+    lease = queue.claim()
+    start = {"kind": "start", "id": "call-1", "model": "google/gemini-3.8-flash", "input_bound": 1000}
+    assert queue.record_usage(lease, start)
+    assert queue.record_usage(lease, start)
+    assert len(row(client, identifier).llm_usage) == 1
+    advance(client, identifier, "lease_expires_at")
+    current = queue.claim()
+    complete = {**start, "kind": "complete", "tokens_in": 10, "tokens_out": 5,
+                "cost_usd": 0.001, "cost_source": "provider_reported"}
+    assert not queue.record_usage(lease, complete)
+    assert not queue.record_usage(current, complete)
+    assert queue.record_usage(current, {**start, "id": "call-2"})
+    assert queue.record_usage(current, {**complete, "id": "call-2"})
+    assert queue.record_usage(current, {**complete, "id": "call-2"})
+    queue.finish(current, fake_extract(current))
+    metadata = row(client, identifier).result["metadata"]
+    assert metadata["model_calls"] == 2 and metadata["tokens_in"] == 10
+    assert not metadata["usage_complete"] and metadata["cost_is_known_subtotal"]
+    assert not queue.record_usage(current, {**start, "id": "call-3"})
+
+
+def test_durable_call_budget_rejects_dispatch_before_network(client, queue):
+    submit(client)
+    lease = queue.claim()
+    queue.settings.llm_max_calls = 1
+    event = {"kind": "start", "id": "first", "model": "google/gemini-3.8-flash", "input_bound": 200}
+    assert queue.record_usage(lease, event)
+    assert not queue.record_usage(lease, {**event, "id": "second"})

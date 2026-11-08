@@ -1,5 +1,6 @@
 """Lease supervisor; extraction runs in a killable child with no database session."""
 import json
+import inspect
 import logging
 import multiprocessing
 import os
@@ -40,7 +41,11 @@ def extraction_child(connection, extractor, lease, parent_pid):
         os.dup2(sink.fileno(), 1)
         os.dup2(sink.fileno(), 2)
         try:
-            connection.send(("result", extractor(lease)))
+            def usage_sink(event):
+                connection.send(("usage", event))
+                return connection.recv()
+            options = {"usage_sink": usage_sink} if "usage_sink" in inspect.signature(extractor).parameters else {}
+            connection.send(("result", extractor(lease, **options)))
         except Exception as exc:
             code = exc.code if isinstance(exc, ExtractionFailure) else FailureCode.EXTRACTION_ERROR
             retryable = exc.retryable if isinstance(exc, ExtractionFailure) else True
@@ -51,7 +56,7 @@ def extraction_child(connection, extractor, lease, parent_pid):
 
 def process_lease(queue, lease, stop_event, settings, extractor=extract):
     context = multiprocessing.get_context("spawn")
-    receiver, sender = context.Pipe(duplex=False)
+    receiver, sender = context.Pipe(duplex=True)
     child = context.Process(target=extraction_child, args=(sender, extractor, lease, os.getpid()), daemon=True)
     child.start()
     sender.close()
@@ -74,6 +79,9 @@ def process_lease(queue, lease, stop_event, settings, extractor=extract):
                 except EOFError:
                     queue.fail(lease, FailureCode.WORKER_LOST)
                     return
+                if kind == "usage":
+                    receiver.send(queue.record_usage(lease, payload))
+                    continue
                 if kind == "result":
                     published = queue.finish(lease, payload)
                     logger.info("job_completion job_id=%s stage=VERIFYING accepted=%s", lease.job_id, published)
